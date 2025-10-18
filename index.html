@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <meta name="description"
+    content="Deformable Neural Radiance Fields creates free-viewpoint portraits (nerfies) from casually captured videos.">
+  <meta name="keywords" content="Nerfies, D-NeRF, NeRF">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title> SAMPO: Scale-wise Autoregression with Motion Prompt for Generative World Models</title>
+
+  <!-- Global site tag (gtag.js) - Google Analytics -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-PYVRSFMDRL"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+
+    function gtag() {
+      dataLayer.push(arguments);
+    }
+
+    gtag('js', new Date());
+
+    gtag('config', 'G-PYVRSFMDRL');
+  </script>
+
+  <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro" rel="stylesheet">
+
+  <link rel="stylesheet" href="./static/css/bootstrap.min.css">
+  <link rel="stylesheet" href="./static/css/bulma.min.css">
+  <link rel="stylesheet" href="./static/css/bulma-carousel.min.css">
+  <link rel="stylesheet" href="./static/css/bulma-slider.min.css">
+  <link rel="stylesheet" href="./static/css/fontawesome.all.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
+  <link rel="stylesheet" href="./static/css/index.css">
+  <link rel="stylesheet" href="./static/css/app.css">
+  <link rel="icon" href="./static/images/icon.png">
+
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+  <script defer src="./static/js/fontawesome.all.min.js"></script>
+  <script src="./static/js/bulma-carousel.min.js"></script>
+  <script src="./static/js/bulma-slider.min.js"></script>
+  <script src="./static/js/index.js"></script>
+  <script src="./static/js/video_comparison.js"></script>
+  <script type="text/javascript" src="https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML"></script>
+</head>
+
+<body>
+  <section class="hero">
+    <div class="hero-body">
+      <div class="container is-max-desktop">
+        <div class="columns is-centered">
+          <div class="column has-text-centered">
+            <h1 class="title is-1 publication-title">SAMPO: Scale-wise Autoregression with Motion Prompt for Generative World Models</h1>
+            <h2 class="subtitle is-3 publication-subtitle">NeurIPS 2025</h2>
+            <div class="is-size-5 publication-authors">
+              <span class="author-block">
+                <a href="https://sanmumumu.github.io/" target="_blank">Sen Wang</a><sup>1</sup>,
+              </span>
+              <span class="author-block">
+                Jingyi Tian<sup>1</sup>,
+              </span>
+              <span class="author-block">
+                Le Wang<sup>1</sup><span class="corresponding-mark">†</span>,
+              </span>
+              <span class="author-block">
+                Zhimin Liao<sup>1</sup>,
+              </span>
+              <span class="author-block">
+                Jiayi Li<sup>1</sup>,
+              </span>
+              <span class="author-block">
+                Huaiyi Dong<sup>1</sup>,
+              </span>
+              <span class="author-block">
+                Kun Xia<sup>1</sup>,
+              </span>
+              <span class="author-block">
+                Sanping Zhou<sup>1</sup>,
+              </span>
+              <span class="author-block">
+                Wei Tang<sup>2</sup>,
+              </span>
+              <span class="author-block">
+                Hua Gang<sup>3</sup>
+              </span>
+            </div>
+
+            <div class="is-size-6 publication-affiliations">
+              <div><sup>1</sup> National Key Laboratory of Human-Machine Hybrid Augmented Intelligence,<br>
+                National Engineering Research Center for Visual Information and Applications,<br>
+                Institute of Artificial Intelligence and Robotics, Xi'an Jiaotong University
+              </div>
+              <div><sup>2</sup> University of Illinois at Chicago</div>
+              <div><sup>3</sup> Amazon.com, Inc.</div>
+              <div class="corresponding-note">† Corresponding author</div>
+            </div>
+
+
+            <div class="column has-text-centered">
+              <div class="publication-links">
+                <span class="link-block">
+                  <a href="https://arxiv.org/pdf/2509.15536" class="external-link button is-normal is-rounded is-dark">
+                    <span class="icon">
+                      <i class="ai ai-arxiv"></i>
+                    </span>
+                    <span>arXiv</span>
+                  </a>
+                </span>
+                <!-- Code Link. -->
+                <span class="link-block">
+                  <a href="https://github.com/SanMumumu/SAMPO"
+                    class="external-link button is-normal is-rounded is-dark">
+                    <span class="icon">
+                      <i class="fab fa-github"></i>
+                    </span>
+                    <span>Coming Soon</span>
+                  </a>
+                </span>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="hero teaser">
+    <div class="container is-max-desktop">
+      <div class="hero-body">
+        <!-- <video id="teaser" autoplay muted loop playsinline height="100%">
+          <source src="./static/videos/teaser.mp4" type="video/mp4">
+        </video> -->
+        <img src="./static/images/teaser-1.png" class="interpolation-image" />
+        <h2 class="subtitle has-text-centered">
+           SAMPO is a scale-wise autoregressive world model for video prediction and robotic control.
+        </h2>
+      </div>
+    </div>
+  </section>
+
+  
+  <section class="section">
+    <div class="container is-max-desktop">
+      <!-- Abstract. -->
+      <div class="columns is-centered has-text-centered">
+        <div class="column is-four-fifths">
+          <h2 class="title is-3">Abstract</h2>
+          <div class="content has-text-justified">
+            <p>
+            World models allow agents to simulate the consequences of actions in imagined environments for planning, control, and long-horizon decision-making.
+            However, existing autoregressive world models struggle with visually coherent predictions due to disrupted spatial structure, inefficient decoding, and inadequate motion modeling.
+            In response, we propose \textbf{S}cale-wise \textbf{A}utoregression with \textbf{M}otion \textbf{P}r\textbf{O}mpt (\textbf{SAMPO}), a hybrid framework that combines visual autoregressive modeling for intra-frame generation with causal modeling for next-frame generation.
+            Specifically, SAMPO integrates temporal causal decoding with bidirectional spatial attention, which preserves spatial locality and supports parallel decoding within each scale. This design significantly enhances both temporal consistency and rollout efficiency.
+            To further improve dynamic scene understanding, we devise an asymmetric multi-scale tokenizer that preserves spatial details in observed frames and extracts compact dynamic representations for future frames, optimizing both memory usage and model performance.
+            Additionally, we introduce a trajectory-aware motion prompt module that injects spatiotemporal cues about object and robot trajectories, focusing attention on dynamic regions and improving temporal consistency and physical realism.
+
+            </p>
+            <p>
+              Extensive experiments show that SAMPO achieves competitive performance in action-conditioned video prediction and model-based control, improving generation quality with 4.4$\times$ faster inference. We also evaluate SAMPO's zero-shot generalization and scaling behavior, demonstrating its ability to generalize to unseen tasks and benefit from larger model sizes.
+
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!--/ Paper video. -->
+    </div>
+  </section>
+
+  <section class="hero is-light is-small">
+      <div class="container is-max-desktop">
+          <h2 class="title is-3 has-text-centered">Pipeline</h2>
+          <div class="has-text-centered">
+              <img src="./static/images/pipeline-1.png" class="interpolation-image" style="max-width: 80%; height: auto;"/>
+          </div>
+          <p class="has-text-centered" style="margin-top: 1rem;">
+              The overall framework of SAMPO. The observed and future frames are discretized by a multi-scale tokenizer to obtain dense and sparse token maps, which are then autoregressively predicted across time, while following a coarse-to-fine decoding order within each frame. Motion prompts extracted from observed frames are injected alongside visual tokens to guide dynamic modeling.
+          </p>
+      </div>
+  </section>
+
+   <section class="hero is-small">
+      <div class="container is-max-desktop">
+          <h2 class="title is-3 has-text-centered">Video prediction results on BAIR and RoboNet</h2>
+          <div class="has-text-centered">
+              <img src="./static/images/videopred.png" class="interpolation-image" style="max-width: 80%; height: auto;"/>
+          </div>
+          <div class="has-text-centered">
+              <img src="./static/images/videopred2.png" class="interpolation-image" style="max-width: 80%; height: auto;"/>
+          </div>
+      </div>
+  </section>
+
+
+  <section class="hero is-light is-small">
+    <div class="container is-max-desktop">
+        <h2 class="title is-3 has-text-centered">Visual planning performance in VP^2</h2>
+        <div class="has-text-centered">
+            <img src="./static/images/vp2.png" class="interpolation-image" style="max-width: 80%; height: auto;"/>
+        </div>
+    </div>
+  </section>
+
+  <section class="hero is-small">
+      <div class="container is-max-desktop">
+          <h2 class="title is-3 has-text-centered">Ablation Studies & Model Analysis</h2>
+          <div class="has-text-centered">
+              <img src="./static/images/a.png" class="interpolation-image" style="max-width: 80%; height: auto;"/>
+          </div>
+      </div>
+  </section>
+
+   <section class="hero  is-light is-small">
+      <div class="container is-max-desktop">
+          <h2 class="title is-3 has-text-centered">Visualization Examples</h2>
+          <div class="has-text-centered">
+              <img src="./static/images/visual1.png" class="interpolation-image" style="max-width: 80%; height: auto;"/>
+          </div>
+          <div class="has-text-centered">
+              <img src="./static/images/img.png" class="interpolation-image" style="max-width: 80%; height: auto;"/>
+          </div>
+          <div class="has-text-centered">
+              <img src="./static/images/img_1.png" class="interpolation-image" style="max-width: 80%; height: auto;"/>
+          </div>
+      </div>
+  </section>
+
+
+  <section class="section" id="BibTeX">
+    <div class="container is-max-desktop content">
+      <h2 class="title">BibTeX</h2>
+      <pre><code>@article{wang2025sampo,
+        title={SAMPO: Scale-wise Autoregression with Motion PrOmpt for generative world models},
+        author={Wang, Sen and Tian, Jingyi and Wang, Le and Liao, Zhimin and Li, Jiayi and Dong, Huaiyi and Xia, Kun and Zhou, Sanping and Tang, Wei and Gang, Hua},
+        journal={arXiv preprint arXiv:2509.15536},
+        year={2025}
+      }
+      </code></pre>
+    </div>
+  </section>
+
+
+  <footer class="footer">
+    <div class="container">
+      <div class="content has-text-centered">
+        <a class="icon-link" href="https://arxiv.org/pdf/2509.15536">
+          <i class="fas fa-file-pdf"></i>
+        </a>
+        <a class="icon-link" href="https://github.com/SanMumumu/SAMPO" class="external-link" disabled>
+          <i class="fab fa-github"></i>
+        </a>
+      </div>
+      <div class="columns is-centered">
+        <div class="column is-8">
+          <div class="content">
+            <p>
+              This website is licensed under a <a rel="license"
+                href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+                Commons Attribution-ShareAlike 4.0 International License</a>.
+            </p>
+            <p>
+              The source code of this website is borrowed from <a
+                href="https://github.com/nerfies/nerfies.github.io">nerfies</a>.
+              We thank the authors for sharing the template.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+</body>
+
+</html>
