@@ -138,7 +138,7 @@ Visualization of motion prompts.
 ## 💡 Acknowledgement
 
 
-Our codebase is based on [thuml/iVideoGPT](https://github.com/thuml/iVideoGPT) and [facebookresearch/CoTracker](https://github.com/facebookresearch/co-tracker). We sincerely thank the authors of iVideoGPT for their groundbreaking work, which has laid a solid foundation for the development of this project.
+Our codebase is based on [thuml/iVideoGPT](https://github.com/thuml/iVideoGPT), [FoundationVision/VAR](https://github.com/FoundationVision/VAR) and [facebookresearch/CoTracker](https://github.com/facebookresearch/co-tracker). We sincerely thank the authors of iVideoGPT for their groundbreaking work, which has laid a solid foundation for the development of this project.
 
 
 
@@ -147,7 +147,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 Copyright (c) 2025. All rights reserved.
 
-This repository contains modified components from the [iVideoGPT](https://github.com/thuml/iVideoGPT) and [CoTracker](https://github.com/facebookresearch/co-tracker) projects. These modifications are provided under the MIT License, which allows for commercial use, distribution, modification, and private use, under the conditions specified in the license.  
+This repository contains modified components from the [iVideoGPT](https://github.com/thuml/iVideoGPT), [VAR](https://github.com/FoundationVision/VAR) and [CoTracker](https://github.com/facebookresearch/co-tracker) projects. These modifications are provided under the MIT License, which allows for commercial use, distribution, modification, and private use, under the conditions specified in the license.  
 
 By using this repository, you agree to the terms of the MIT License, including the disclaimers and limitations of liability.  
 
