@@ -27,3 +27,4 @@ gym
 hydra-submitit-launcher
 PyOpenGL_accelerate
 bitsandbytes
+flash-attn --no-build-isolation 

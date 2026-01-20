@@ -2,13 +2,13 @@ from typing import *
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from diffusers.models.activations import get_activation
 from .vae import Encoder, Decoder
 
 
 class CrossAttentionBlock(nn.Module):
-
     def __init__(
         self,
         channels,
@@ -20,15 +20,24 @@ class CrossAttentionBlock(nn.Module):
         kv_frames=1
     ) -> None:
         super().__init__()
+        self.num_head = num_head
+        self.channels = channels
+        self.head_dim = channels // num_head
+        self.scale = self.head_dim ** -0.5
+        self.dropout = dropout
 
-        self.att = nn.MultiheadAttention(channels, num_head, dropout=dropout, batch_first=True)
+        self.q_proj = nn.Linear(channels, channels)
+        self.k_proj = nn.Linear(channels, channels)
+        self.v_proj = nn.Linear(channels, channels)
+        self.out_proj = nn.Linear(channels, channels)
+
         self.resid_dropout = nn.Dropout(dropout)
         self.kv_norm = nn.GroupNorm(norm_group, channels)
         self.q_norm = nn.GroupNorm(norm_group, channels)
         self.kv_frames = kv_frames
-        self.kv_pos_emb = nn.parameter.Parameter(torch.zeros((kv_frames * resolution * resolution, channels)),
+        self.kv_pos_emb = nn.Parameter(torch.zeros((kv_frames * resolution * resolution, channels)),
                                                  requires_grad=True)
-        self.q_pos_emb = nn.parameter.Parameter(torch.zeros((resolution * resolution, channels)), requires_grad=True)
+        self.q_pos_emb = nn.Parameter(torch.zeros((resolution * resolution, channels)), requires_grad=True)
         self.act = get_activation(act_fn)
 
     def set_kv_frames(self, kv_frames):
@@ -36,20 +45,32 @@ class CrossAttentionBlock(nn.Module):
         self.kv_frames = kv_frames
 
     def forward(self, z, addin):
-        # x: [B, C, H, W]
-        # addin: [B, C, H, W] or [B, t, C, H, W]
         if self.kv_frames > 1:
-            # B, t, C, H, W -> B, C, tH, W
             addin = addin.permute(0, 2, 1, 3, 4).reshape(addin.shape[0], addin.shape[2], -1, addin.shape[3])
-        kv = self.kv_norm(addin).permute(0, 2, 3, 1).reshape(addin.shape[0], -1, addin.shape[1])  # [B, HW, C]
+        
+        kv = self.kv_norm(addin).permute(0, 2, 3, 1).reshape(addin.shape[0], -1, addin.shape[1])
         kv = kv + self.kv_pos_emb
-        q = self.q_norm(z).permute(0, 2, 3, 1).reshape(z.shape[0], -1, z.shape[1])  # [B, HW, C]
+        q = self.q_norm(z).permute(0, 2, 3, 1).reshape(z.shape[0], -1, z.shape[1])
         q = q + self.q_pos_emb
 
-        attn_output, attn_weight = self.att(q, kv, kv)
+        query = self.q_proj(q)
+        key = self.k_proj(kv)
+        value = self.v_proj(kv)
+
+        batch_size = query.shape[0]
+        query = query.view(batch_size, -1, self.num_head, self.head_dim).transpose(1, 2)
+        key = key.view(batch_size, -1, self.num_head, self.head_dim).transpose(1, 2)
+        value = value.view(batch_size, -1, self.num_head, self.head_dim).transpose(1, 2)
+
+        attn_output = F.scaled_dot_product_attention(
+            query, key, value, dropout_p=self.dropout if self.training else 0.0, scale=self.scale
+        )
+
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, -1, self.channels)
+        attn_output = self.out_proj(attn_output)
         attn_output = self.resid_dropout(attn_output)
 
-        attn_output = attn_output.permute(0, 2, 1).reshape(z.shape)  # [B, C, H, W]
+        attn_output = attn_output.permute(0, 2, 1).reshape(z.shape)
         z = self.act(z + attn_output)
 
         return z

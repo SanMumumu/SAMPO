@@ -837,7 +837,7 @@ class VectorQuantizer2(nn.Module):
         B, C, H, W = z.shape
         z_no_grad = z.detach()
         z_rest = z_no_grad.clone()
-        z_hat = torch.zeros_like(z_rest) # 累积重建特征
+        z_hat = torch.zeros_like(z_rest)
         total_vq_loss = torch.tensor(0., device=z.device)
 
         idx_N_sq = []

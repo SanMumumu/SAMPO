@@ -149,40 +149,14 @@ class Encoder(nn.Module):
         sample = self.conv_in(sample)
         features.append(sample)
 
-        if self.training and self.gradient_checkpointing:
-            assert False  # TODO: fix
-
-            def create_custom_forward(module):
-                def custom_forward(*inputs):
-                    return module(*inputs)
-
-                return custom_forward
-
-            # down
-            if is_torch_version(">=", "1.11.0"):
-                for down_block in self.down_blocks:
-                    sample = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(down_block), sample, use_reentrant=False
-                    )
-                # middle
-                sample = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(self.mid_block), sample, use_reentrant=False
-                )
-            else:
-                for down_block in self.down_blocks:
-                    sample = torch.utils.checkpoint.checkpoint(create_custom_forward(down_block), sample)
-                # middle
-                sample = torch.utils.checkpoint.checkpoint(create_custom_forward(self.mid_block), sample)
-
-        else:
-            # down
-            for down_block in self.down_blocks:
-                sample = down_block(sample)
-                features.append(sample)
-
-            # middle
-            sample = self.mid_block(sample)
+        # down
+        for down_block in self.down_blocks:
+            sample = down_block(sample)
             features.append(sample)
+
+        # middle
+        sample = self.mid_block(sample)
+        features.append(sample)
 
         # post-process
         sample = self.conv_norm_out(sample)

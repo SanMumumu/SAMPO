@@ -329,8 +329,7 @@ def main():
     #####################################
 
     if accelerator.is_main_process:
-        tracker_config = dict(vars(args))
-        accelerator.init_trackers(args.tracker_project_name, tracker_config)
+        accelerator.init_trackers(args.tracker_project_name)
 
     # If passed along, set the training seed now.
     if args.seed is not None:
@@ -631,10 +630,10 @@ def main():
 
                     if args.model_type == 'ctx_vqgan':
                         fmap, fmap_ref, commit_loss, dyna_commit_loss = model(sample=reference_single, # fmap:[7, 3, 64, 64] [1, 3, 64, 64]
-                                                                                     dyn_sample=target,
-                                                                                     return_dict=False,
-                                                                                     return_loss=True,
-                                                                                     segment_len=args.segment_length - args.context_length)
+                                                                              dyn_sample=target,
+                                                                              return_dict=False,
+                                                                              return_loss=True,
+                                                                              segment_len=args.segment_length - args.context_length)
                     else:
                         raise NotImplementedError
                 else:
