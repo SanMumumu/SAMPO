@@ -40,12 +40,12 @@ from transformers.utils.versions import require_version
 from SAMPO.vq_model import CompressiveVQModel
 from SAMPO.transformer import HeadModelWithAction
 from SAMPO.utils.video_metric import Evaluator, FeatureStats
-from SAMPO.tracker.cotracker import apply_cotracker_on_first_two_frames
+# from SAMPO.tracker.cotracker import apply_cotracker_on_first_two_frames
 from SAMPO.data import *
 from peft import LoraConfig, TaskType, get_peft_model
 from SAMPO.transformer import build_var
-from cotracker.predictor import CoTrackerOnlinePredictor
-from cotracker.utils.visualizer import Visualizer
+# from cotracker.predictor import CoTrackerOnlinePredictor
+# from cotracker.utils.visualizer import Visualizer
 
 import os
 os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
@@ -258,7 +258,7 @@ def parse_args():
     # evaluation
     parser.add_argument('--max_eval_iters', default=100, type=int)
     parser.add_argument('--use_eval_dataset', default=False, action='store_true')
-    parser.add_argument('--i3d_path', default='pretrained_models/i3d_torchscript.pt', type=str, help='path to the i3d model')
+    parser.add_argument('--i3d_path', default='/mnt/data/wangsen/World_model/code/pretrained_models/i3d_torchscript.pt', type=str, help='path to the i3d model')
     parser.add_argument('--use_frame_metrics', default=False, action='store_true')
     parser.add_argument('--use_fvd', default=False, action='store_true')
     parser.add_argument('--eval_generate_times', default=1, type=int, help='for eval, fvd')
@@ -531,10 +531,10 @@ def start_train():
                       total_length = args.segment_length, 
                       context_length = args.context_length, 
                       device = accelerator.device)
-    # Motion Prompt
-    cotracker_model = CoTrackerOnlinePredictor(
-        checkpoint="co-tracker/checkpoints/scaled_online.pth"
-        ).to(accelerator.device).eval()
+    # # Motion Prompt
+    # cotracker_model = CoTrackerOnlinePredictor(
+    #     checkpoint="co-tracker/checkpoints/scaled_online.pth"
+    #     ).to(accelerator.device).eval()
     
     if args.action_conditioned:
         # TODO: magic number
@@ -708,17 +708,20 @@ def start_train():
             optimizer.zero_grad()
 
             with torch.no_grad():
-                if random.random() < args.cotracker_prob:
-                    modified_pixel_values = apply_cotracker_on_first_two_frames(
-                        pixel_values=pixel_values,
-                        model=cotracker_model,
-                        device=accelerator.device
-                    )
-                prefix, dyn, _, indices_d = accelerator.unwrap_model(tokenizer).tokenize(pixel_values, args.context_length)
-                model_input = {
-                    'prefix': prefix,
-                    'idx_BTL': indices_d,
-                }
+                # if random.random() < args.cotracker_prob:
+                #     modified_pixel_values = apply_cotracker_on_first_two_frames(
+                #         pixel_values=pixel_values,
+                #         model=cotracker_model,
+                #         device=accelerator.device
+                #     )
+                # prefix, dyn, _, indices_d = accelerator.unwrap_model(tokenizer).tokenize(pixel_values, args.context_length)
+                # model_input = {
+                #     'prefix': prefix,
+                #     'idx_BTL': indices_d,
+                # }
+                prefix, dyn, indices_c, indices_d = accelerator.unwrap_model(tokenizer).tokenize(pixel_values, args.context_length)
+                recon = accelerator.unwrap_model(tokenizer).detokenize(indices_c, indices_d, args.context_length) # for debug
+                model_input = {'prefix': prefix, 'idx_BTL': indices_d,}
                 if args.action_conditioned:
                     model_input['action'] = actions
 

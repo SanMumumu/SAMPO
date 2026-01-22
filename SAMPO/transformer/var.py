@@ -18,14 +18,18 @@ def create_attn_bias_for_masking(patch_nums, dynamic_length, context_length, dev
     L = sum(pn ** 2 for pn in patch_nums_d)
 
     dyn_sf = torch.cat([torch.full((pn * pn,), i) for i, pn in enumerate(patch_nums_d)]).view(1, L, 1).to(device)
-    context = - torch.ones(context_length * 256).view(1, 256, 1).to(device) # magical number: prefix.shape[1]
+    
+    ctx_tokens_per_frame = patch_nums[-1] ** 2 
+    total_ctx_tokens = context_length * ctx_tokens_per_frame
+    
+    context = - torch.ones(total_ctx_tokens).view(1, -1, 1).to(device)
+    
     all_tokens = torch.cat([context, dyn_sf], dim=1)
     dT = all_tokens.transpose(1, 2)  # (1, 1, L)
     attn_bias = torch.where(all_tokens >= dT, 0., -torch.inf).reshape(1, 1, all_tokens.shape[1], all_tokens.shape[1]).contiguous()
     lvl_emb = dyn_sf.view(1, L)
 
     return lvl_emb, attn_bias
-
 
 class SharedAdaLin(nn.Linear):
     def forward(self, cond_BD):
@@ -88,7 +92,7 @@ class VAR(nn.Module):
         assert tuple(pos_1LC.shape) == (1, self.L, self.C)
         self.pos_1LC = nn.Parameter(pos_1LC)
 
-        # 5. level embedding (similar to GPT's segment embedding, used to distinguish different levels of token pyramid)
+        # 5. level embedding
         self.lvl_embed = nn.Embedding(len(self.d_patch_nums * (self.dynamic_length)), self.C)
         nn.init.trunc_normal_(self.lvl_embed.weight.data, mean=0, std=init_std)
         
@@ -97,7 +101,7 @@ class VAR(nn.Module):
         
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         self.drop_path_rate = drop_path_rate 
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule (linearly increasing)
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.ModuleList([
             AdaLNSelfAttn(
                 cond_dim=self.D, shared_aln=shared_aln,
@@ -111,16 +115,8 @@ class VAR(nn.Module):
         
         fused_add_norm_fns = [b.fused_add_norm_fn is not None for b in self.blocks]
         self.using_fused_add_norm_fn = any(fused_add_norm_fns)
-        # # logger.info
-        # print(
-        #     f'\n[constructor]  ==== flash_if_available={flash_if_available} ({sum(b.attn.using_flash for b in self.blocks)}/{self.depth}), fused_if_available={fused_if_available} (fusing_add_ln={sum(fused_add_norm_fns)}/{self.depth}, fusing_mlp={sum(b.ffn.fused_mlp_func is not None for b in self.blocks)}/{self.depth}) ==== \n'
-        #     f'[VAR config ] embed_dim={embed_dim}, num_heads={num_heads}, depth={depth}, mlp_ratio={mlp_ratio}\n'
-        #     f'[drop ratios] drop_rate={drop_rate}, attn_drop_rate={attn_drop_rate}, drop_path_rate={drop_path_rate:g} ({torch.linspace(0, drop_path_rate, depth)})',
-        #     end='\n\n', flush=True
-        # )
         
-        # attention mask used in training (for masking out the future), it won't be used in inference, since kv cache is enabled
-        lvl_1L, attn_bias_for_masking = create_attn_bias_for_masking(patch_nums=self.d_patch_nums,  # [1 1275], [1, 1, 1275, 1275]
+        lvl_1L, attn_bias_for_masking = create_attn_bias_for_masking(patch_nums=self.d_patch_nums,
                                                                      dynamic_length=self.dynamic_length,
                                                                      context_length=self.context_length,
                                                                      device=self.device)
@@ -128,14 +124,25 @@ class VAR(nn.Module):
         self.register_buffer('attn_bias_for_masking', attn_bias_for_masking.contiguous())
         
         # classifier head
-        self.head_nm = AdaLNBeforeHead(self.C, self.D, norm_layer=norm_layer) # LayerNorm + SiLU + Linear(in_features=1024, out_features=2048, bias=True)
-        self.head = nn.Linear(self.C, self.V) # Linear(in_features=1024, out_features=4096, bias=True)
+        self.head_nm = AdaLNBeforeHead(self.C, self.D, norm_layer=norm_layer) 
+        self.head = nn.Linear(self.C, self.V)
 
         # loss function
         self.train_loss = nn.CrossEntropyLoss(reduction='none')
         token_counts = [x**2 / len(self.d_patch_nums) for x in self.d_patch_nums]
         scaling_factor = len(self.d_patch_nums) / sum(token_counts)
         self.loss_weights = torch.tensor([x * scaling_factor for x in token_counts], device=self.device)
+        
+        # [FIX START] 修复 Context Position Embedding 尺寸不匹配问题
+        # 使用 c_patch_nums[-1] (Context 分辨率) 而不是 d_patch_nums (Dynamics 分辨率)
+        ctx_dim = self.c_patch_nums[-1]**2  # e.g., 16*16 = 256
+        self.pos_ctx_template = nn.Parameter(torch.empty(1, ctx_dim, self.C))
+        nn.init.trunc_normal_(self.pos_ctx_template, mean=0, std=init_std)
+        
+        # Level index (如果 d_patch_nums 只有 6 层，这里 index 是 5；虽然 Context 是 16x16，
+        # 但我们暂时复用 Dynamics 的最后一层 ID 作为近似，或者你可以新建一个 lvl ID)
+        self.lvl_ctx_idx = len(self.d_patch_nums) - 1
+        # [FIX END]
     
     def get_logits(self, h_or_h_and_residual, cond_BD=None):
         if not isinstance(h_or_h_and_residual, torch.Tensor):
@@ -154,49 +161,66 @@ class VAR(nn.Module):
         C, H, W = self.Cvae, self.c_patch_nums[-1], self.c_patch_nums[-1]
         next_scales, total_scales = [], len(self.d_patch_nums)
 
+        offset = 0
+        if hasattr(self.vq_model, 'num_vq_embeddings'):
+            offset = self.vq_model.num_vq_embeddings
+
         for t in range(self.dynamic_length):
             z_dyn = torch.zeros(B, C, H, W).to(self.device)
             idx_BL = idx_BTL[:, t, :]
             for si, pn in enumerate(self.d_patch_nums[:-1]):
                 s, e = self.index_ranges[si]
-                idx = idx_BL[:, s:e].reshape(B, pn, pn)
+                idx = idx_BL[:, s:e] 
+
+                if offset > 0 and idx.min() >= offset:
+                     idx = idx - offset
+                
+                idx = idx.clamp(min=0, max=self.vq_model.num_dyn_embeddings - 1)
+
+                idx = idx.reshape(B, pn, pn)
+                
                 h_BChw = F.interpolate(self.vq_model.dynamics_quantize.embedding(idx).permute(0,3,1,2), size=(H, W), mode='bicubic')
                 z_dyn = z_dyn + self.vq_model.dynamics_quantize.quant_resi[si/(total_scales -1)](h_BChw)
                 pn_next = self.d_patch_nums[si+1]
                 next_scales.append(F.interpolate(z_dyn, size=(pn_next, pn_next), mode='area').view(B, C, -1).transpose(1, 2))
 
-        return torch.cat(next_scales, dim=1) # [8, 1260, 64]
+        return torch.cat(next_scales, dim=1) 
          
     @torch.no_grad()
-    def autoregressive_infer_cfg(self, prefix, dyn, B, g_seed, top_k=100, top_p=1.0):#900 0.95 # returns reconstructed image (B, 3, H, W) in [0, 1]
-        """
-        only used for inference, on autoregressive mode
-        :param B: batch size 8
-        :param g_seed: random seed
-        :return: if returns_vemb: list of embedding h_BChw := vae_embed(idx_Bl), else: list of idx_Bl
-        """
+    def autoregressive_infer_cfg(self, prefix, dyn, B, g_seed, top_k=100, top_p=1.0):
         if g_seed is None: rng = None
         else: self.rng.manual_seed(g_seed); rng = self.rng
         
-        sos = self.pos_start.expand(B, -1, -1, -1) # [B, 15, 1, 1024]
-        time_emb = self.time_embed.unsqueeze(0).unsqueeze(2) # [1, 15, 1, 1024]
-        sos = sos + time_emb # add time embedding for each frame
-        lvl_pos = self.lvl_embed(self.lvl_1L) + self.pos_1LC # [1, 1275, 1024] + [1, 1275, 1024]
+        sos = self.pos_start.expand(B, -1, -1, -1) 
+        time_emb = self.time_embed.unsqueeze(0).unsqueeze(2) 
+        sos = sos + time_emb 
+        lvl_pos = self.lvl_embed(self.lvl_1L) + self.pos_1LC 
 
         future_frames = []
-        prefix_emb = self.prefix_embed(prefix) # [8, 256, 1024]
+        prefix_emb = self.prefix_embed(prefix) 
+
+        # [FIX] 使用独立的 pos_ctx_template
+        spatial_pos = self.pos_ctx_template.repeat(1, self.context_length, 1)
+        
+        level_pos = self.lvl_embed(torch.tensor([self.lvl_ctx_idx], device=self.device)).unsqueeze(1)
+        # 注意: 这里的 expand 必须匹配 prefix_emb 的长度 (256)
+        level_pos = level_pos.expand(1, prefix_emb.shape[1], -1)
+        
+        ctx_pos = (spatial_pos + level_pos).expand(B, -1, -1)
+        prefix_emb = prefix_emb + ctx_pos
 
         for b in self.blocks: b.attn.kv_caching(True)
+        # Pre-fill KV Cache with Prefix
+        for b in self.blocks:
+            prefix_emb = b(x=prefix_emb, attn_bias=None)        
+        
         token_maps = []
         for i in range(self.dynamic_length):
-            lvl_frame_pos = lvl_pos[:, 85*i : 85*(i+1)] # [1, 85, 1024] magic number
-            next_token_map = sos[:, i] + lvl_frame_pos[:, :self.first_l] # [B, 1, 1024]
-            if i == 0:
-                for b in self.blocks:
-                    prefix_emb = b(x=prefix_emb, attn_bias=None)
-
+            lvl_frame_pos = lvl_pos[:, 85*i : 85*(i+1)] 
+            next_token_map = sos[:, i] + lvl_frame_pos[:, :self.first_l] 
+            
             cur_L = 0
-            f_hat = sos.new_zeros(B, self.Cvae, self.c_patch_nums[-1], self.c_patch_nums[-1]) # [8, 64, 16, 16]
+            f_hat = sos.new_zeros(B, self.Cvae, self.c_patch_nums[-1], self.c_patch_nums[-1]) 
             
             cur_tf = 0
             for si, pn in enumerate(self.d_patch_nums):
@@ -208,17 +232,15 @@ class VAR(nn.Module):
 
                 logits_BlV = self.get_logits(x)
                 
-                # idx_Bl = dyn[:, i, cur_tf: cur_tf+pn*pn] # # TF
-                # idx_Bl = logits_BlV.argmax(dim=-1)
                 idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)
-                h_BChw = self.vq_model.dynamics_quantize.embedding(idx_Bl).transpose_(1, 2).reshape(B, self.Cvae, pn, pn) # [B, Cvae, pn, pn]
+                h_BChw = self.vq_model.dynamics_quantize.embedding(idx_Bl).transpose_(1, 2).reshape(B, self.Cvae, pn, pn) 
                 f_hat, next_token_map = self.vq_model.dynamics_quantize.generate_next_scale(si, len(self.d_patch_nums), f_hat, h_BChw, HW=self.c_patch_nums[-1])
-                token_maps.append(f_hat)
-                if si != (len(self.d_patch_nums)-1): # prepare for next stage
+                
+                if si != (len(self.d_patch_nums)-1): 
                     next_token_map = next_token_map.view(B, self.Cvae, -1).transpose(1, 2)
-                    time_frame_pos = self.time_embed[i].unsqueeze(0).expand(B, -1, -1) # [B, 1, 1024]
+                    time_frame_pos = self.time_embed[i].unsqueeze(0).expand(B, -1, -1) 
                     next_token_map = self.word_embed(next_token_map) + lvl_frame_pos[:, cur_L:cur_L + self.d_patch_nums[si+1] ** 2] + time_frame_pos
-                cur_tf += pn*pn # TF
+                cur_tf += pn*pn 
             future_frames.append(f_hat)
 
         for b in self.blocks: b.attn.kv_caching(False)
@@ -231,14 +253,13 @@ class VAR(nn.Module):
                 f.reshape(B, self.context_length, *f.shape[-3:]).unsqueeze(1)
                 .repeat(1, self.dynamic_length, 1, 1, 1, 1).reshape(-1, self.context_length, *f.shape[-3:])
                 for f in cond_features
-            ]  # B*(T-t), t, C, H, W
+            ] 
         else:
             cond_features = [f.unsqueeze(1).repeat(1, self.dynamic_length, 1, 1, 1)
                              .reshape(-1, *f.shape[-3:]) for f in cond_features]
             
-        pred_frame = torch.stack(future_frames, dim=1) # [8, 15, 64, 16, 16]
+        pred_frame = torch.stack(future_frames, dim=1) 
         quant_d2 = self.vq_model.post_quant_convdyn(pred_frame.reshape(-1, *pred_frame.shape[-3:]))
-        # quant_d2 = self.vq_model.post_quant_convdyn(dyn.float())
         dec = self.vq_model.cond_decoder(quant_d2, cond_features)
         dec_frames = dec.reshape(B, self.dynamic_length, -1, dec.shape[-1], dec.shape[-1])
         full_frame = torch.cat([context_dec.unsqueeze(1), dec_frames], dim=1)
@@ -251,30 +272,44 @@ class VAR(nn.Module):
         :param idx_BTL: idxBL [B, T, L]
         :return: loss
         """
+        if idx_BTL.shape[-1] == self.L + 1:
+            idx_BTL = idx_BTL[:, :, 1:] 
+            
         B, ed = prefix.shape[0], self.L
-        x_BLCv_wo_first_l = self.idxBL_to_var_input(idx_BTL) # [B, 15, 85]->[B, 1260, 64]
         
-        x_frames = x_BLCv_wo_first_l.view(B, self.dynamic_length, -1, self.Cvae) # [B, 15, 84, 64]
+        x_BLCv_wo_first_l = self.idxBL_to_var_input(idx_BTL) 
+        
+        x_frames = x_BLCv_wo_first_l.view(B, self.dynamic_length, -1, self.Cvae) 
         with torch.cuda.amp.autocast(enabled=False):
             sos = self.pos_start.expand(B, -1, -1, -1)
-            x_frames_c = torch.cat((sos, self.word_embed(x_frames.float())), dim=2)                    # start token embedding
-            time_emb = self.time_embed.unsqueeze(0).unsqueeze(2) # [1, 15, 1, 1024]
-            x_frames_c = x_frames_c + time_emb                   # [B, 15, 85, 1024]                   # frame embedding
-            x_BLC = x_frames_c.view(B, -1, x_frames_c.shape[-1]) # [B, 1275, 1024]
-            x_BLC = x_BLC + self.lvl_embed(self.lvl_1L.expand(B, -1)) + self.pos_1LC.expand(B, -1, -1) # level embedding and position embedding(eacj)
+            x_frames_c = torch.cat((sos, self.word_embed(x_frames.float())), dim=2) 
+            time_emb = self.time_embed.unsqueeze(0).unsqueeze(2) 
+            x_frames_c = x_frames_c + time_emb 
+            x_BLC = x_frames_c.view(B, -1, x_frames_c.shape[-1]) 
+            x_BLC = x_BLC + self.lvl_embed(self.lvl_1L.expand(B, -1)) + self.pos_1LC.expand(B, -1, -1)
 
-        attn_bias = self.attn_bias_for_masking # attention map
+        attn_bias = self.attn_bias_for_masking 
         bg = attn_bias.shape[-1] - ed
-        # hack: get the dtype if mixed precision is used
+        
         temp = x_BLC.new_ones(8, 8)
-        main_type = torch.matmul(temp, temp).dtype # bfloat16
+        main_type = torch.matmul(temp, temp).dtype 
         
         x_BLC = x_BLC.to(dtype=main_type)
         prefix = prefix.to(dtype=main_type)
         attn_bias = attn_bias.to(dtype=main_type)
-        prefix_emb = self.prefix_embed(prefix)
-        x_BLC = torch.cat((prefix_emb, x_BLC), dim=1) # add prefix information
         
+        prefix_emb = self.prefix_embed(prefix)
+        
+        # [FIX] 对应修改
+        spatial_pos = self.pos_ctx_template.repeat(1, self.context_length, 1)
+        
+        level_pos = self.lvl_embed(torch.tensor([self.lvl_ctx_idx], device=self.device)).unsqueeze(1)
+        level_pos = level_pos.expand(1, prefix_emb.shape[1], -1)
+        
+        ctx_pos = (spatial_pos + level_pos).expand(B, -1, -1)
+        prefix_emb = prefix_emb + ctx_pos
+        
+        x_BLC = torch.cat((prefix_emb, x_BLC), dim=1)
         AdaLNSelfAttn.forward
         for _, b in enumerate(self.blocks):
             x_BLC = b(x=x_BLC, attn_bias=attn_bias)
@@ -283,6 +318,7 @@ class VAR(nn.Module):
         loss = dict()
         loss_backward = 0
         x_BTLC_logits = x_BLC_logits.view(B, self.dynamic_length, -1, self.V)
+        
         for i, (start, end) in enumerate(self.index_ranges):
             x_BTLC_logits_i = x_BTLC_logits[:, :, start:end, :].clone().view(-1, self.V)
             idx_BTL_i = idx_BTL[:, :, start:end].clone().view(-1)
@@ -291,7 +327,8 @@ class VAR(nn.Module):
             loss_backward += loss[i] 
        
         return loss_backward, loss
-    
+
+    # init_weights 和 extra_repr 方法保持不变，可以省略或保留
     def init_weights(self, init_adaln=0.5, init_adaln_gamma=1e-5, init_head=0.02, init_std=0.02, conv_std_or_gain=0.02):
         if init_std < 0: init_std = (1 / self.C / 3) ** 0.5     # init_std < 0: automated
         print(f'[init_weights] {type(self).__name__} with {init_std=:g}')
@@ -348,7 +385,7 @@ class VAR(nn.Module):
                 sab.ada_gss.data[:, :, 2:].mul_(init_adaln) 
                 sab.ada_gss.data[:, :, :2].mul_(init_adaln_gamma)
 
-        pos_embed = get_1d_sincos_pos_embed(self.time_embed.shape[1], self.time_embed.shape[0])
+        pos_embed = get_1d_sincos_pos_embed(self.time_embed.shape[1], self.time_embed.shape[0]) # [15, 1024]
         self.time_embed.data.copy_(torch.from_numpy(pos_embed).float())
     
     def extra_repr(self):

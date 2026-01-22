@@ -954,10 +954,10 @@ def main():
                             # compute losses
                             if args.model_type == 'ctx_vqgan':
                                 fmap, fmap_ref, commit_loss, dyna_commit_loss = model(sample=reference_single,
-                                                                                             dyn_sample=target,
-                                                                                             return_dict=False,
-                                                                                             return_loss=True,
-                                                                                             segment_len=args.segment_length - args.context_length)
+                                                                                      dyn_sample=target,
+                                                                                      return_dict=False,
+                                                                                      return_loss=True,
+                                                                                      segment_len=args.segment_length - args.context_length)
                             else:
                                 fmap, commit_loss = model(pixel_values, return_dict=False, return_loss=True)
 
