@@ -137,7 +137,7 @@ class VAR(nn.Module):
         self.train_loss = nn.CrossEntropyLoss(reduction='none')
         token_counts = [x**2 / len(self.d_patch_nums) for x in self.d_patch_nums]
         scaling_factor = len(self.d_patch_nums) / sum(token_counts)
-        self.loss_weights = torch.tensor([x * scaling_factor for x in token_counts], device=self.device)
+        self.loss_weights = torch.tensor([x * scaling_factor * 0.3 for x in token_counts], device=self.device)
         
         # Context Positional Embedding
         ctx_dim = self.c_patch_nums[-1]**2
@@ -145,6 +145,34 @@ class VAR(nn.Module):
         nn.init.trunc_normal_(self.pos_ctx_template, mean=0, std=init_std)
         self.lvl_ctx_idx = len(self.d_patch_nums) - 1
     
+    def _strip_frame_special_token(self, idx_BTL: torch.Tensor) -> torch.Tensor:
+        """
+        Tokenizer 的 indices_d 每帧是: [spc | dyn_tokens...]
+        其中 dyn_tokens 长度 = sum(pn^2 for pn in self.d_patch_nums)
+        本函数把 spc 去掉，并保证长度对齐到 dyn_tokens_len。
+        """
+        dyn_tokens_len = sum(pn * pn for pn in self.d_patch_nums)
+
+        # idx_BTL: [B, T, L]
+        if idx_BTL.dim() != 3:
+            raise ValueError(f"idx_BTL must be [B,T,L], got {tuple(idx_BTL.shape)}")
+
+        L = idx_BTL.shape[-1]
+
+        # Case 1: 正常情况: L = dyn_tokens_len + 1 (含 spc)
+        if L == dyn_tokens_len + 1:
+            return idx_BTL[:, :, 1:]  # drop spc
+
+        # Case 2: 已经不含 spc
+        if L == dyn_tokens_len:
+            return idx_BTL
+
+        # Case 3: 其他长度(容错)：取最后 dyn_tokens_len 个 token（强制对齐）
+        if L > dyn_tokens_len:
+            return idx_BTL[:, :, -dyn_tokens_len:]
+
+        raise ValueError(f"Unexpected per-frame token length L={L}, expected {dyn_tokens_len} or {dyn_tokens_len+1}")
+
     def get_logits(self, h_or_h_and_residual, cond_BD=None):
         if not isinstance(h_or_h_and_residual, torch.Tensor):
             h, resi = h_or_h_and_residual   # fused_add_norm must be used
@@ -157,11 +185,14 @@ class VAR(nn.Module):
             return self.head(self.head_nm(h.float()).float()).float()
 
     def idxBL_to_var_input(self, idx_BTL):
-        if idx_BTL.shape[-1] > self.L:
-            idx_BTL = idx_BTL[:, :, -self.L:]
+        idx_BTL = self._strip_frame_special_token(idx_BTL)
             
         assert idx_BTL.shape[1] == self.dynamic_length
         B, T, L = idx_BTL.shape
+        
+        expected = sum(pn * pn for pn in self.d_patch_nums)
+        assert L == expected, f"idx_BTL per-frame L={L}, expected {expected}"
+        
         C, H, W = self.Cvae, self.c_patch_nums[-1], self.c_patch_nums[-1]
         next_scales, total_scales = [], len(self.d_patch_nums)
 
@@ -176,10 +207,10 @@ class VAR(nn.Module):
                 s, e = self.index_ranges[si]
                 idx = idx_BL[:, s:e] 
 
-                if offset > 0 and idx.min() >= offset:
-                     idx = idx - offset
-                
-                idx = idx.clamp(min=0, max=self.vq_model.num_dyn_embeddings - 1)
+                idx_local = idx - offset  # 无条件转局部
+                # 只允许合法范围，其它映射到 0（或你定义的 unk）
+                idx_local = idx_local.clamp_(0, self.vq_model.num_dyn_embeddings - 1)
+                idx = idx_local
 
                 idx = idx.reshape(B, pn, pn)
                 
@@ -189,86 +220,126 @@ class VAR(nn.Module):
                 next_scales.append(F.interpolate(z_dyn, size=(pn_next, pn_next), mode='area').view(B, C, -1).transpose(1, 2))
 
         return torch.cat(next_scales, dim=1) 
-         
+
     @torch.no_grad()
     def autoregressive_infer_cfg(self, prefix, dyn, B, g_seed, top_k=100, top_p=1.0):
-        if g_seed is None: rng = None
-        else: self.rng.manual_seed(g_seed); rng = self.rng
-        
-        sos = self.pos_start.expand(B, -1, -1, -1) 
-        time_emb = self.time_embed.unsqueeze(0).unsqueeze(2) 
-        sos = sos + time_emb 
-        lvl_pos = self.lvl_embed(self.lvl_1L) + self.pos_1LC 
+        # rng
+        if g_seed is None:
+            rng = None
+        else:
+            self.rng.manual_seed(g_seed)
+            rng = self.rng
 
-        future_frames = []
-        prefix_emb = self.prefix_embed(prefix) 
+        # ---------- global/dyn vocab bookkeeping ----------
+        offset = int(getattr(self.vq_model, "num_vq_embeddings", 0))
+        dynV = int(getattr(self.vq_model, "num_dyn_embeddings", 0))
+        assert dynV > 0, "vq_model.num_dyn_embeddings must be > 0"
+        assert self.V >= offset + dynV, f"VAR vocab_size (V={self.V}) must cover [0, offset+dynV) = {offset+dynV}"
 
+        # ---------- prepare positional embeddings ----------
+        sos = self.pos_start.expand(B, -1, -1, -1)                         # [B, Tdyn, first_l, C]
+        time_emb = self.time_embed.unsqueeze(0).unsqueeze(2)               # [1, Tdyn, 1, C]
+        sos = sos + time_emb
+
+        # lvl_pos covers ALL dynamic tokens across ALL frames (no special token)
+        lvl_pos = self.lvl_embed(self.lvl_1L) + self.pos_1LC               # [1, L_total, C]
+        frame_token_len = sum(pn * pn for pn in self.d_patch_nums)         # per-frame tokens (no spc)
+
+        # ---------- prefix embedding + ctx position ----------
+        prefix_emb = self.prefix_embed(prefix)                             # [B, Lctx, C]
         spatial_pos = self.pos_ctx_template.repeat(1, self.context_length, 1)
         level_pos = self.lvl_embed(torch.tensor([self.lvl_ctx_idx], device=self.device)).unsqueeze(1)
         level_pos = level_pos.expand(1, prefix_emb.shape[1], -1)
-        
         ctx_pos = (spatial_pos + level_pos).expand(B, -1, -1)
         prefix_emb = prefix_emb + ctx_pos
 
-        for b in self.blocks: b.attn.kv_caching(True)
-        # Pre-fill KV Cache with Prefix
+        # ---------- enable kv cache & prefill with prefix ----------
         for b in self.blocks:
-            prefix_emb = b(x=prefix_emb, attn_bias=None)        
-        
-        frame_token_len = sum(pn ** 2 for pn in self.d_patch_nums)
-        
-        token_maps = []
+            b.attn.kv_caching(True)
+
+        x_prefill = prefix_emb
+        for b in self.blocks:
+            x_prefill = b(x=x_prefill, attn_bias=None)
+
+        # ---------- autoregressive generation (frame-by-frame, stage-by-stage) ----------
+        future_frames = []
+
         for i in range(self.dynamic_length):
-            lvl_frame_pos = lvl_pos[:, frame_token_len*i : frame_token_len*(i+1)] 
-            
-            next_token_map = sos[:, i] + lvl_frame_pos[:, :self.first_l] 
-            
+            # absolute positions for this frame (no spc)
+            lvl_frame_pos = lvl_pos[:, frame_token_len * i: frame_token_len * (i + 1)]  # [1, frame_token_len, C]
+
+            # first stage token map: SOS + first stage absolute pos
+            next_token_map = sos[:, i] + lvl_frame_pos[:, :self.first_l]                # [B, first_l, C]
+
             cur_L = 0
-            f_hat = sos.new_zeros(B, self.Cvae, self.c_patch_nums[-1], self.c_patch_nums[-1]) 
-            
-            cur_tf = 0
+            f_hat = sos.new_zeros(B, self.Cvae, self.c_patch_nums[-1], self.c_patch_nums[-1])
+
             for si, pn in enumerate(self.d_patch_nums):
-                cur_L += pn*pn
+                cur_L += pn * pn
+
+                # transformer blocks (kv cache is ON, so this appends tokens)
                 x = next_token_map
-                AdaLNSelfAttn.forward
                 for b in self.blocks:
                     x = b(x=x, attn_bias=None)
 
-                logits_BlV = self.get_logits(x)
-                
-                idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)
-                h_BChw = self.vq_model.dynamics_quantize.embedding(idx_Bl).transpose_(1, 2).reshape(B, self.Cvae, pn, pn) 
-                f_hat, next_token_map = self.vq_model.dynamics_quantize.generate_next_scale(si, len(self.d_patch_nums), f_hat, h_BChw, HW=self.c_patch_nums[-1])
-                
-                if si != (len(self.d_patch_nums)-1): 
-                    next_token_map = next_token_map.view(B, self.Cvae, -1).transpose(1, 2)
-                    time_frame_pos = self.time_embed[i].unsqueeze(0).expand(B, -1, -1) 
-                    
-                    next_token_map = self.word_embed(next_token_map) + lvl_frame_pos[:, cur_L:cur_L + self.d_patch_nums[si+1] ** 2] + time_frame_pos
-                cur_tf += pn*pn 
+                # logits over GLOBAL vocab
+                logits_BlV = self.get_logits(x)                                         # [B, pn², Vglobal]
+
+                # -------- critical: sample ONLY from dyn segment --------
+                logits_dyn = logits_BlV[..., offset:offset + dynV]                      # [B, pn², dynV]
+                idx_local = sample_with_top_k_top_p_(logits_dyn, rng=rng,
+                                                    top_k=top_k, top_p=top_p, num_samples=1)  # [B, pn²], 0..dynV-1
+
+                # embed with LOCAL indices (directly valid for dynamics_quantize.embedding)
+                h_BChw = self.vq_model.dynamics_quantize.embedding(idx_local) \
+                    .transpose(1, 2).reshape(B, self.Cvae, pn, pn)
+
+                # update multi-scale latent + build next scale token map
+                f_hat, next_token_map = self.vq_model.dynamics_quantize.generate_next_scale(
+                    si, len(self.d_patch_nums), f_hat, h_BChw, HW=self.c_patch_nums[-1]
+                )
+
+                # prepare tokens for next stage
+                if si != (len(self.d_patch_nums) - 1):
+                    pn_next = self.d_patch_nums[si + 1]
+                    next_token_map = next_token_map.view(B, self.Cvae, -1).transpose(1, 2)      # [B, pn_next², Cvae]
+
+                    # correct shape: [B, 1, C]
+                    time_frame_pos = self.time_embed[i].view(1, 1, -1).expand(B, -1, -1)
+
+                    next_token_map = self.word_embed(next_token_map) \
+                                    + lvl_frame_pos[:, cur_L: cur_L + pn_next * pn_next] \
+                                    + time_frame_pos
+
             future_frames.append(f_hat)
 
-        for b in self.blocks: b.attn.kv_caching(False)
+        # ---------- disable kv cache ----------
+        for b in self.blocks:
+            b.attn.kv_caching(False)
 
+        # ---------- decode: context + predicted dynamics ----------
         prefix_src = prefix.reshape(B, f_hat.shape[2], f_hat.shape[3], -1).permute(0, 3, 1, 2)
         prefix_src = self.vq_model.post_quant_conv(prefix_src)
         context_dec, cond_features = self.vq_model.decoder(prefix_src, return_features=True)
+
         if self.context_length > 1:
             cond_features = [
                 f.reshape(B, self.context_length, *f.shape[-3:]).unsqueeze(1)
                 .repeat(1, self.dynamic_length, 1, 1, 1, 1).reshape(-1, self.context_length, *f.shape[-3:])
                 for f in cond_features
-            ] 
+            ]
         else:
-            cond_features = [f.unsqueeze(1).repeat(1, self.dynamic_length, 1, 1, 1)
-                             .reshape(-1, *f.shape[-3:]) for f in cond_features]
-            
-        pred_frame = torch.stack(future_frames, dim=1) 
+            cond_features = [
+                f.unsqueeze(1).repeat(1, self.dynamic_length, 1, 1, 1).reshape(-1, *f.shape[-3:])
+                for f in cond_features
+            ]
+
+        pred_frame = torch.stack(future_frames, dim=1)                                   # [B, Tdyn, Cvae, H, W]
         quant_d2 = self.vq_model.post_quant_convdyn(pred_frame.reshape(-1, *pred_frame.shape[-3:]))
         dec = self.vq_model.cond_decoder(quant_d2, cond_features)
         dec_frames = dec.reshape(B, self.dynamic_length, -1, dec.shape[-1], dec.shape[-1])
-        full_frame = torch.cat([context_dec.unsqueeze(1), dec_frames], dim=1)
 
+        full_frame = torch.cat([context_dec.unsqueeze(1), dec_frames], dim=1)
         return full_frame.clamp(0.0, 1.0)
     
     def forward(self, prefix, idx_BTL):
@@ -277,6 +348,8 @@ class VAR(nn.Module):
         :param idx_BTL: idxBL [B, T, L]
         :return: loss
         """
+        idx_BTL = self._strip_frame_special_token(idx_BTL)
+
         if idx_BTL.shape[-1] > self.L:
             # print(f"Trimming idx_BTL from {idx_BTL.shape} to last {self.L} tokens.") # Debug print
             idx_BTL = idx_BTL[:, :, -self.L:] 

@@ -27,7 +27,7 @@ def build_var(
     # build models
     var_wo_ddp = VAR(
         depth=depth, embed_dim=width, num_heads=heads, drop_rate=0., attn_drop_rate=0., drop_path_rate=dpr,
-        norm_eps=1e-6, shared_aln=shared_aln, cond_drop_rate=0.1,
+        norm_eps=1e-6, shared_aln=shared_aln, cond_drop_rate=0.1, vocab_size=8192+8192,
         attn_l2_norm=attn_l2_norm,
         c_patch_nums=c_patch_nums, d_patch_nums=d_patch_nums,
         total_length=total_length, context_length=context_length,
