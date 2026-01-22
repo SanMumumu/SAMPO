@@ -181,7 +181,6 @@ class CompressiveVQModel(ModelMixin, ConfigMixin):
 
         # 1. Encode Context
         h, cond_features = self.encoder(context_frames, return_features=True)
-        # 处理 condition (与之前保持一致)
         if self.context_length > 1:
             B_fut = future_frames.shape[0] // future_length
             cond_features = [
@@ -204,11 +203,9 @@ class CompressiveVQModel(ModelMixin, ConfigMixin):
         quant_d, dyn_commit_loss, info_d = self.dynamics_quantize(d)
 
         # 3. Construct Indices
-        # info[0] 通常是 list of indices per scale
         indices_c = torch.cat([idx.reshape(B, context_length, -1) for idx in info[0]], dim=-1)
         indices_d = torch.cat([idx.reshape(B, future_length, -1) for idx in info_d[0]], dim=-1)
         
-        # [FIX 1] 加上偏移量，让 dynamics token 在全局词表中独立
         indices_d = indices_d + self.num_vq_embeddings 
 
         prefix = info[1].permute(0, 2, 3, 1).reshape(B, -1, info[1].shape[1])
@@ -231,7 +228,6 @@ class CompressiveVQModel(ModelMixin, ConfigMixin):
         flat_indices_d = indices_d.reshape(B, -1)
         indices = torch.cat([flat_indices_c, flat_indices_d], dim=1)
         
-        # 计算每个部分的 Token 长度
         ctx_tokens_per_frame = sum(p*p for p in self.quantize.v_patch_nums)
         dyn_tokens_per_frame = sum(p*p for p in self.dynamics_quantize.v_patch_nums)
         target_res_dyn = dyn_tokens_per_frame + 1 # +1 for special token
@@ -240,11 +236,8 @@ class CompressiveVQModel(ModelMixin, ConfigMixin):
         
         # --- Decode Context (Fix: Handle Multiple Frames) ---
         context_dec_frames = []
-        # 如果 indices_c 已经被 flatten 了，我们需要按帧切分
-        # 注意：这里假设 context 部分没有 special token
         
         for t in range(context_length):
-            # 取出当前帧的所有 scale token
             current_frame_indices = indices[:, start : start + ctx_tokens_per_frame]
             start += ctx_tokens_per_frame
             
@@ -252,30 +245,25 @@ class CompressiveVQModel(ModelMixin, ConfigMixin):
             scale_indices = []
             frame_start = 0
             
-            # 分割 scales
             for ph in self.quantize.v_patch_nums:
                 num_tokens = ph * ph
                 scale_indices.append(current_frame_indices[:, frame_start : frame_start + num_tokens])
                 frame_start += num_tokens
 
-            # 重建 Latent
             for si, ph in enumerate(self.quantize.v_patch_nums):
                 idx = scale_indices[si].reshape(B, ph, ph)
                 quant = self.quantize.embedding(idx).permute(0, 3, 1, 2)
                 quant = F.interpolate(quant, size=(16, 16), mode='bicubic').contiguous()
                 
                 total_scales = len(self.quantize.v_patch_nums)
-                # 注意：确保 quant_resi 支持 float index 或者这里逻辑与 VAR 一致
                 scale_idx = si / (total_scales - 1) if total_scales > 1 else 0
                 quant_resi = self.quantize.quant_resi[scale_idx](quant)
                 z_hat += quant_resi
             
             quant2 = self.post_quant_conv(z_hat)
-            # Decoder 输出
             dec_frame, _ = self.decoder(quant2, return_features=True)
             context_dec_frames.append(dec_frame)
             
-            # 保存最后一帧的 cond_features 用于 Future (简化逻辑，通常取最后一帧或全部)
             if t == context_length - 1:
                 _, cond_features = self.decoder(quant2, return_features=True)
 
@@ -283,18 +271,15 @@ class CompressiveVQModel(ModelMixin, ConfigMixin):
 
         # --- Decode Future ---
         future_frames = []
-        # 计算剩余长度包含了多少帧
         remaining_tokens = indices.shape[1] - start
         future_length = remaining_tokens // target_res_dyn
         
         for t in range(future_length):
-            # 取出当前帧，跳过第1个 Special Token (+1)
             frame_start_idx = start + 1 
             frame_end_idx = start + target_res_dyn
             
-            # [FIX 1] 对应 tokenize 中的加法，这里减去偏移量
             indices_d_t = (indices[:, frame_start_idx : frame_end_idx] - self.num_vq_embeddings).clamp(min=0, max=self.num_dyn_embeddings - 1)
-            start += target_res_dyn # 移动总指针
+            start += target_res_dyn
 
             z_dyn = torch.zeros(B, self.dyna_latent_channels, 16, 16).to(indices.device)
             scale_indices = []
@@ -320,8 +305,6 @@ class CompressiveVQModel(ModelMixin, ConfigMixin):
 
             quant_d2 = self.post_quant_convdyn(z_dyn)
             
-            # 注意：这里 cond_features 应该如何传递取决于 ConditionalDecoder 的实现
-            # 如果是 Autoregressive，每一帧 condition 可能不同。如果是并行解码，使用 Context 特征即可。
             dec = self.cond_decoder(quant_d2, cond_features)
             future_frames.append(dec)
 
@@ -354,26 +337,6 @@ class CompressiveVQModel(ModelMixin, ConfigMixin):
 
         quant2 = self.post_quant_conv(quant)
         quant2_d = self.post_quant_convdyn(quant_d)
-
-        # ################# visual ！ #################
-        # lvl_frame = []
-        # for i in range(len(lvl_quant)):
-        #     lvl_quant2 = self.post_quant_conv(lvl_quant[i])
-        #     lvl_dec, _ = self.decoder(lvl_quant2, return_features=True)
-        #     lvl_frame.append(lvl_dec)
-        # lvl_frame_stack = torch.stack(lvl_frame, dim=0).squeeze(1) # [10 3 64 64]
-        # import matplotlib.pyplot as plt
-        # # 假设 pixel_values 是一个形状为 [1, 16, 3, 64, 64] 的张量
-        # a = lvl_frame_stack  # 去掉批次维度，形状变为 [16, 3, 64, 64]
-        # a = a.float()
-        # row_image = torch.cat(list(a), dim=2)  # 沿宽度方向拼接
-        # row_image_np = row_image.permute(1, 2, 0).cpu().detach().numpy()  # 转换为 [H, W, C]
-        # plt.figure(figsize=(16, 4))  # 调整图像大小
-        # plt.imshow(row_image_np)
-        # plt.axis('off')  # 关闭坐标轴
-        # plt.subplots_adjust(left=0, right=1, top=1, bottom=0)  # 调整子图布局，确保没有白边
-        # plt.savefig('context_lvl.png', bbox_inches='tight', pad_inches=0)
-        # ################# visual ！ #################
 
         ref_dec, cond_features = self.decoder(quant2, return_features=True)
         if self.context_length > 1:

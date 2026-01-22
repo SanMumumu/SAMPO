@@ -781,10 +781,13 @@ def start_train():
                     evaluate(args, accelerator, tokenizer, model, eval_dataloader, evaluator, completed_steps)
 
                 if avg_loss > 20.0:
-                    accelerator.load_state(lastest_output_dir)
-                    progress_bar.update(lastest_completed_steps - completed_steps)
-                    completed_steps = lastest_completed_steps
-                    print(f"Encounter avg_loss {avg_loss}, load state from", lastest_output_dir)
+                    if lastest_output_dir is not None:
+                        accelerator.load_state(lastest_output_dir)
+                        progress_bar.update(lastest_completed_steps - completed_steps)
+                        completed_steps = lastest_completed_steps
+                        print(f"Encounter avg_loss {avg_loss}, load state from", lastest_output_dir)
+                    else:
+                        print(f"Encounter avg_loss {avg_loss}, but no checkpoint to load. Continuing...")
 
             if completed_steps >= args.max_train_steps:
                 break

@@ -13,13 +13,17 @@ from accelerate.logging import get_logger
 
 logger = get_logger(__name__)
 
-def create_attn_bias_for_masking(patch_nums, dynamic_length, context_length, device):
+def create_attn_bias_for_masking(patch_nums, dynamic_length, context_length, device, c_patch_nums=None):
     patch_nums_d = patch_nums * dynamic_length
     L = sum(pn ** 2 for pn in patch_nums_d)
 
     dyn_sf = torch.cat([torch.full((pn * pn,), i) for i, pn in enumerate(patch_nums_d)]).view(1, L, 1).to(device)
     
-    ctx_tokens_per_frame = patch_nums[-1] ** 2 
+    if c_patch_nums is not None:
+        ctx_tokens_per_frame = c_patch_nums[-1] ** 2
+    else:
+        ctx_tokens_per_frame = patch_nums[-1] ** 2
+        
     total_ctx_tokens = context_length * ctx_tokens_per_frame
     
     context = - torch.ones(total_ctx_tokens).view(1, -1, 1).to(device)
@@ -30,6 +34,7 @@ def create_attn_bias_for_masking(patch_nums, dynamic_length, context_length, dev
     lvl_emb = dyn_sf.view(1, L)
 
     return lvl_emb, attn_bias
+
 
 class SharedAdaLin(nn.Linear):
     def forward(self, cond_BD):
@@ -101,7 +106,7 @@ class VAR(nn.Module):
         
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         self.drop_path_rate = drop_path_rate 
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  
         self.blocks = nn.ModuleList([
             AdaLNSelfAttn(
                 cond_dim=self.D, shared_aln=shared_aln,
@@ -116,15 +121,16 @@ class VAR(nn.Module):
         fused_add_norm_fns = [b.fused_add_norm_fn is not None for b in self.blocks]
         self.using_fused_add_norm_fn = any(fused_add_norm_fns)
         
-        lvl_1L, attn_bias_for_masking = create_attn_bias_for_masking(patch_nums=self.d_patch_nums,
+        lvl_1L, attn_bias_for_masking = create_attn_bias_for_masking(patch_nums=self.d_patch_nums,  
                                                                      dynamic_length=self.dynamic_length,
                                                                      context_length=self.context_length,
-                                                                     device=self.device)
+                                                                     device=self.device,
+                                                                     c_patch_nums=self.c_patch_nums)
         self.register_buffer('lvl_1L', lvl_1L)
         self.register_buffer('attn_bias_for_masking', attn_bias_for_masking.contiguous())
         
         # classifier head
-        self.head_nm = AdaLNBeforeHead(self.C, self.D, norm_layer=norm_layer) 
+        self.head_nm = AdaLNBeforeHead(self.C, self.D, norm_layer=norm_layer)
         self.head = nn.Linear(self.C, self.V)
 
         # loss function
@@ -133,16 +139,11 @@ class VAR(nn.Module):
         scaling_factor = len(self.d_patch_nums) / sum(token_counts)
         self.loss_weights = torch.tensor([x * scaling_factor for x in token_counts], device=self.device)
         
-        # [FIX START] 修复 Context Position Embedding 尺寸不匹配问题
-        # 使用 c_patch_nums[-1] (Context 分辨率) 而不是 d_patch_nums (Dynamics 分辨率)
-        ctx_dim = self.c_patch_nums[-1]**2  # e.g., 16*16 = 256
+        # Context Positional Embedding
+        ctx_dim = self.c_patch_nums[-1]**2
         self.pos_ctx_template = nn.Parameter(torch.empty(1, ctx_dim, self.C))
         nn.init.trunc_normal_(self.pos_ctx_template, mean=0, std=init_std)
-        
-        # Level index (如果 d_patch_nums 只有 6 层，这里 index 是 5；虽然 Context 是 16x16，
-        # 但我们暂时复用 Dynamics 的最后一层 ID 作为近似，或者你可以新建一个 lvl ID)
         self.lvl_ctx_idx = len(self.d_patch_nums) - 1
-        # [FIX END]
     
     def get_logits(self, h_or_h_and_residual, cond_BD=None):
         if not isinstance(h_or_h_and_residual, torch.Tensor):
@@ -156,6 +157,9 @@ class VAR(nn.Module):
             return self.head(self.head_nm(h.float()).float()).float()
 
     def idxBL_to_var_input(self, idx_BTL):
+        if idx_BTL.shape[-1] > self.L:
+            idx_BTL = idx_BTL[:, :, -self.L:]
+            
         assert idx_BTL.shape[1] == self.dynamic_length
         B, T, L = idx_BTL.shape
         C, H, W = self.Cvae, self.c_patch_nums[-1], self.c_patch_nums[-1]
@@ -199,11 +203,8 @@ class VAR(nn.Module):
         future_frames = []
         prefix_emb = self.prefix_embed(prefix) 
 
-        # [FIX] 使用独立的 pos_ctx_template
         spatial_pos = self.pos_ctx_template.repeat(1, self.context_length, 1)
-        
         level_pos = self.lvl_embed(torch.tensor([self.lvl_ctx_idx], device=self.device)).unsqueeze(1)
-        # 注意: 这里的 expand 必须匹配 prefix_emb 的长度 (256)
         level_pos = level_pos.expand(1, prefix_emb.shape[1], -1)
         
         ctx_pos = (spatial_pos + level_pos).expand(B, -1, -1)
@@ -214,9 +215,12 @@ class VAR(nn.Module):
         for b in self.blocks:
             prefix_emb = b(x=prefix_emb, attn_bias=None)        
         
+        frame_token_len = sum(pn ** 2 for pn in self.d_patch_nums)
+        
         token_maps = []
         for i in range(self.dynamic_length):
-            lvl_frame_pos = lvl_pos[:, 85*i : 85*(i+1)] 
+            lvl_frame_pos = lvl_pos[:, frame_token_len*i : frame_token_len*(i+1)] 
+            
             next_token_map = sos[:, i] + lvl_frame_pos[:, :self.first_l] 
             
             cur_L = 0
@@ -239,6 +243,7 @@ class VAR(nn.Module):
                 if si != (len(self.d_patch_nums)-1): 
                     next_token_map = next_token_map.view(B, self.Cvae, -1).transpose(1, 2)
                     time_frame_pos = self.time_embed[i].unsqueeze(0).expand(B, -1, -1) 
+                    
                     next_token_map = self.word_embed(next_token_map) + lvl_frame_pos[:, cur_L:cur_L + self.d_patch_nums[si+1] ** 2] + time_frame_pos
                 cur_tf += pn*pn 
             future_frames.append(f_hat)
@@ -272,8 +277,9 @@ class VAR(nn.Module):
         :param idx_BTL: idxBL [B, T, L]
         :return: loss
         """
-        if idx_BTL.shape[-1] == self.L + 1:
-            idx_BTL = idx_BTL[:, :, 1:] 
+        if idx_BTL.shape[-1] > self.L:
+            # print(f"Trimming idx_BTL from {idx_BTL.shape} to last {self.L} tokens.") # Debug print
+            idx_BTL = idx_BTL[:, :, -self.L:] 
             
         B, ed = prefix.shape[0], self.L
         
@@ -300,9 +306,7 @@ class VAR(nn.Module):
         
         prefix_emb = self.prefix_embed(prefix)
         
-        # [FIX] 对应修改
         spatial_pos = self.pos_ctx_template.repeat(1, self.context_length, 1)
-        
         level_pos = self.lvl_embed(torch.tensor([self.lvl_ctx_idx], device=self.device)).unsqueeze(1)
         level_pos = level_pos.expand(1, prefix_emb.shape[1], -1)
         
@@ -310,6 +314,7 @@ class VAR(nn.Module):
         prefix_emb = prefix_emb + ctx_pos
         
         x_BLC = torch.cat((prefix_emb, x_BLC), dim=1)
+        
         AdaLNSelfAttn.forward
         for _, b in enumerate(self.blocks):
             x_BLC = b(x=x_BLC, attn_bias=attn_bias)
@@ -321,14 +326,15 @@ class VAR(nn.Module):
         
         for i, (start, end) in enumerate(self.index_ranges):
             x_BTLC_logits_i = x_BTLC_logits[:, :, start:end, :].clone().view(-1, self.V)
-            idx_BTL_i = idx_BTL[:, :, start:end].clone().view(-1)
+            
+            idx_BTL_i = idx_BTL[:, :, start:end].clone().view(-1).clamp(0, self.V - 1)
+            
             loss_i = self.train_loss(x_BTLC_logits_i, idx_BTL_i).view(B, -1).mean()
             loss[i] = loss_i * self.loss_weights[i]
             loss_backward += loss[i] 
        
         return loss_backward, loss
 
-    # init_weights 和 extra_repr 方法保持不变，可以省略或保留
     def init_weights(self, init_adaln=0.5, init_adaln_gamma=1e-5, init_head=0.02, init_std=0.02, conv_std_or_gain=0.02):
         if init_std < 0: init_std = (1 / self.C / 3) ** 0.5     # init_std < 0: automated
         print(f'[init_weights] {type(self).__name__} with {init_std=:g}')
