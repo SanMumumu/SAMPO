@@ -331,7 +331,6 @@ class CompressiveVQModel(ModelMixin, ConfigMixin):
         return_dict: bool = True,
     ) -> Union[CompressiveVQDecoderOutput, torch.FloatTensor]:
         # also go through quantization layer
-        # quant, commit_loss, lvl_quant, _ = self.quantize(h)
         quant, commit_loss, _ = self.quantize(h)
         quant_d, dyn_commit_loss, _ = self.dynamics_quantize(d)
 

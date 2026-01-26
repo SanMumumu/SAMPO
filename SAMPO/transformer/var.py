@@ -16,7 +16,6 @@ logger = get_logger(__name__)
 def create_attn_bias_for_masking(patch_nums, dynamic_length, context_length, device, c_patch_nums=None):
     patch_nums_d = patch_nums * dynamic_length
     L = sum(pn ** 2 for pn in patch_nums_d)
-
     dyn_sf = torch.cat([torch.full((pn * pn,), i) for i, pn in enumerate(patch_nums_d)]).view(1, L, 1).to(device)
     
     if c_patch_nums is not None:
@@ -25,9 +24,7 @@ def create_attn_bias_for_masking(patch_nums, dynamic_length, context_length, dev
         ctx_tokens_per_frame = patch_nums[-1] ** 2
         
     total_ctx_tokens = context_length * ctx_tokens_per_frame
-    
     context = - torch.ones(total_ctx_tokens).view(1, -1, 1).to(device)
-    
     all_tokens = torch.cat([context, dyn_sf], dim=1)
     dT = all_tokens.transpose(1, 2)  # (1, 1, L)
     attn_bias = torch.where(all_tokens >= dT, 0., -torch.inf).reshape(1, 1, all_tokens.shape[1], all_tokens.shape[1]).contiguous()
@@ -57,7 +54,13 @@ class VAR(nn.Module):
         # 0. hyperparameters
         assert embed_dim % num_heads == 0 
         self.depth, self.C, self.D, self.num_heads = depth, embed_dim, embed_dim, num_heads  # 16 1024 1024 16
-        self.vq_model, self.V, self.Cvae, self.device = vq_model, vocab_size, Cvae, device  # 8192
+        self.vq_model, self.V, self.Cvae, self.device = vq_model, vocab_size, Cvae, device
+        
+        if self.vq_model is not None:
+            for p in self.vq_model.parameters():
+                p.requires_grad = False
+            self.vq_model.eval()
+            
         self.total_length, self.context_length = total_length, context_length
         self.dynamic_length = self.total_length - self.context_length
         self.cond_drop_rate = cond_drop_rate # 0.1
@@ -147,9 +150,9 @@ class VAR(nn.Module):
     
     def _strip_frame_special_token(self, idx_BTL: torch.Tensor) -> torch.Tensor:
         """
-        Tokenizer 的 indices_d 每帧是: [spc | dyn_tokens...]
-        其中 dyn_tokens 长度 = sum(pn^2 for pn in self.d_patch_nums)
-        本函数把 spc 去掉，并保证长度对齐到 dyn_tokens_len。
+        The `indices_d` of the Tokenizer for each frame is: [spc | dyn_tokens...]
+        where the length of `dyn_tokens` = sum(pn^2 for pn in self.d_patch_nums)
+        This function removes `spc` and ensures the length is aligned to `dyn_tokens_len`.
         """
         dyn_tokens_len = sum(pn * pn for pn in self.d_patch_nums)
 
@@ -159,20 +162,23 @@ class VAR(nn.Module):
 
         L = idx_BTL.shape[-1]
 
-        # Case 1: 正常情况: L = dyn_tokens_len + 1 (含 spc)
         if L == dyn_tokens_len + 1:
             return idx_BTL[:, :, 1:]  # drop spc
 
-        # Case 2: 已经不含 spc
         if L == dyn_tokens_len:
             return idx_BTL
 
-        # Case 3: 其他长度(容错)：取最后 dyn_tokens_len 个 token（强制对齐）
         if L > dyn_tokens_len:
             return idx_BTL[:, :, -dyn_tokens_len:]
 
         raise ValueError(f"Unexpected per-frame token length L={L}, expected {dyn_tokens_len} or {dyn_tokens_len+1}")
 
+    def train(self, mode=True):
+            super().train(mode)
+            if self.vq_model is not None:
+                self.vq_model.eval()
+            return self
+    
     def get_logits(self, h_or_h_and_residual, cond_BD=None):
         if not isinstance(h_or_h_and_residual, torch.Tensor):
             h, resi = h_or_h_and_residual   # fused_add_norm must be used
@@ -207,8 +213,7 @@ class VAR(nn.Module):
                 s, e = self.index_ranges[si]
                 idx = idx_BL[:, s:e] 
 
-                idx_local = idx - offset  # 无条件转局部
-                # 只允许合法范围，其它映射到 0（或你定义的 unk）
+                idx_local = idx - offset
                 idx_local = idx_local.clamp_(0, self.vq_model.num_dyn_embeddings - 1)
                 idx = idx_local
 
@@ -217,7 +222,7 @@ class VAR(nn.Module):
                 h_BChw = F.interpolate(self.vq_model.dynamics_quantize.embedding(idx).permute(0,3,1,2), size=(H, W), mode='bicubic')
                 z_dyn = z_dyn + self.vq_model.dynamics_quantize.quant_resi[si/(total_scales -1)](h_BChw)
                 pn_next = self.d_patch_nums[si+1]
-                next_scales.append(F.interpolate(z_dyn, size=(pn_next, pn_next), mode='area').view(B, C, -1).transpose(1, 2))
+                next_scales.append(F.interpolate(z_dyn, size=(pn_next, pn_next), mode='bilinear').view(B, C, -1).transpose(1, 2))
 
         return torch.cat(next_scales, dim=1) 
 

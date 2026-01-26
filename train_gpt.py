@@ -40,17 +40,12 @@ from transformers.utils.versions import require_version
 from SAMPO.vq_model import CompressiveVQModel
 from SAMPO.transformer import HeadModelWithAction
 from SAMPO.utils.video_metric import Evaluator, FeatureStats
-# from SAMPO.tracker.cotracker import apply_cotracker_on_first_two_frames
 from SAMPO.data import *
 from peft import LoraConfig, TaskType, get_peft_model
 from SAMPO.transformer import build_var
-# from cotracker.predictor import CoTrackerOnlinePredictor
-# from cotracker.utils.visualizer import Visualizer
 
 import os
 os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
-# Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-# check_min_version("4.39.0.dev0")
 
 logger = get_logger(__name__)
 
@@ -246,7 +241,7 @@ def parse_args():
     parser.add_argument('--oxe_data_mixes_type', default='select', type=str)
 
     parser.add_argument("--log_steps", type=int, default=100, help=("Print logs every X steps."))
-    parser.add_argument("--validation_steps", type=int, default=300)
+    parser.add_argument("--validation_steps", type=int, default=5000)
     parser.add_argument('--skip_first_val', default=False, action='store_true')
     parser.add_argument('--latest_checkpoint_only', default=False, action='store_true')
     parser.add_argument('--special_token', default=True, action='store_true')
@@ -254,6 +249,9 @@ def parse_args():
     parser.add_argument('--action_dim', default=4, type=int, help='action dimension for the task')
     parser.add_argument('--embed_no_wd', default=False, action='store_true')
     parser.add_argument('--goal_conditioned', default=False, action='store_true')
+    
+    # model
+    parser.add_argument('--depth', type=int, default=16, help=("Model's Layers: S-12, B-16, L-20"))
 
     # evaluation
     parser.add_argument('--max_eval_iters', default=100, type=int)
@@ -530,11 +528,8 @@ def start_train():
     model = build_var(vq_model = tokenizer,
                       total_length = args.segment_length, 
                       context_length = args.context_length, 
+                      depth = args.depth,
                       device = accelerator.device)
-    # # Motion Prompt
-    # cotracker_model = CoTrackerOnlinePredictor(
-    #     checkpoint="co-tracker/checkpoints/scaled_online.pth"
-    #     ).to(accelerator.device).eval()
     
     if args.action_conditioned:
         # TODO: magic number
@@ -583,14 +578,16 @@ def start_train():
                     fpn = '%s.%s' % (mn, pn) if mn else pn
                     no_decay.append(fpn)
     optimizer_grouped_parameters = [
-        {
-            "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
-            "weight_decay": args.weight_decay,
-        },
-        {
-            "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
-            "weight_decay": 0.0,
-        },
+            {
+                "params": [p for n, p in model.named_parameters() 
+                        if (not any(nd in n for nd in no_decay) and p.requires_grad)],
+                "weight_decay": args.weight_decay,
+            },
+            {
+                "params": [p for n, p in model.named_parameters() 
+                        if (any(nd in n for nd in no_decay) and p.requires_grad)],
+                "weight_decay": 0.0,
+            },
     ]
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
 
@@ -708,20 +705,14 @@ def start_train():
             optimizer.zero_grad()
 
             with torch.no_grad():
-                # if random.random() < args.cotracker_prob:
-                #     modified_pixel_values = apply_cotracker_on_first_two_frames(
-                #         pixel_values=pixel_values,
-                #         model=cotracker_model,
-                #         device=accelerator.device
-                #     )
-                # prefix, dyn, _, indices_d = accelerator.unwrap_model(tokenizer).tokenize(pixel_values, args.context_length)
-                # model_input = {
-                #     'prefix': prefix,
-                #     'idx_BTL': indices_d,
-                # }
                 prefix, dyn, indices_c, indices_d = accelerator.unwrap_model(tokenizer).tokenize(pixel_values, args.context_length)
-                recon = accelerator.unwrap_model(tokenizer).detokenize(indices_c, indices_d, args.context_length) # for debug
-                model_input = {'prefix': prefix, 'idx_BTL': indices_d,}
+                unwrapped_tokenizer = accelerator.unwrap_model(tokenizer)
+                offset = 0
+                if hasattr(unwrapped_tokenizer, 'num_vq_embeddings'):
+                    offset = unwrapped_tokenizer.num_vq_embeddings
+                # recon = accelerator.unwrap_model(tokenizer).detokenize(indices_c, indices_d, args.context_length) # for debug
+                model_input = {'prefix': prefix, 'idx_BTL': indices_d }
+
                 if args.action_conditioned:
                     model_input['action'] = actions
 

@@ -28,14 +28,6 @@ except ImportError:
         if attn_mask is not None: attn.add_(attn_mask)
         return (F.dropout(attn.softmax(dim=-1), p=dropout_p, inplace=True) if dropout_p > 0 else attn.softmax(dim=-1)) @ value
 
-# class SwiGLU(nn.Module):
-#     def __init__(self):
-#         super(SwiGLU, self).__init__()
-
-#     def forward(self, x):
-#         return x * torch.sigmoid(x)
-
-
 class FFN(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, drop=0., fused_if_available=True):
         super().__init__()
@@ -43,7 +35,6 @@ class FFN(nn.Module):
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
         self.fc1 = nn.Linear(in_features, hidden_features)
-        # self.act = SwiGLU()
         self.act = nn.GELU()
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop, inplace=True) if drop > 0 else nn.Identity()
@@ -124,9 +115,6 @@ class SelfAttention(nn.Module):
             oup = slow_attn(query=q, key=k, value=v, scale=self.scale, attn_mask=attn_bias, dropout_p=dropout_p).transpose(1, 2).reshape(B, L, C)
         
         return self.proj_drop(self.proj(oup))
-        # attn = (q @ k.transpose(-2, -1)).add_(attn_bias + self.local_rpb())  # BHLc @ BHcL => BHLL
-        # attn = self.attn_drop(attn.softmax(dim=-1))
-        # oup = (attn @ v).transpose_(1, 2).reshape(B, L, -1)     # BHLL @ BHLc = BHLc => BLHc => BLC
     
     def extra_repr(self) -> str:
         return f'using_flash={self.using_flash}, using_xform={self.using_xform}, attn_l2_norm={self.attn_l2_norm}'
