@@ -42,7 +42,8 @@ cd ..
 
 
 ## 🤗 Models
-Coming soon...
+Detail in [Huggingface Model Hub.](https://huggingface.co/collections/wsmumumu/sampo)
+
 
 ## 📦 Data Preparation
 ### **Open X-Embodiment:**
@@ -77,7 +78,7 @@ accelerate launch train_tokenizer.py \
     --rand_select --video_stepsize 1 --segment_horizon 16 --segment_length 8 --context_length 2 \
     --dataset_path {path to preprocessed_OXE} \
 
-accelerate launch train_gpt.py \
+accelerate launch train_var.py \
     --exp_name oxe-64-act-free-transformer --output_dir log_trm --seed 0 --mixed_precision bf16 \
     --vqgan_type ctx_vqgan \
     --pretrained_model_name_or_path {log directory of finetuned tokenizer}/unwrapped_model \
@@ -107,7 +108,7 @@ accelerate launch train_tokenizer.py \
     --max_train_steps 200005
 
 
-accelerate launch train_gpt.py \
+accelerate launch train_var.py \
     --exp_name bair_llama_ft --output_dir log_trm --seed 0 --mixed_precision bf16 \
     --vqgan_type ctx_vqgan \
     --pretrained_model_name_or_path {log directory of finetuned tokenizer}/unwrapped_model \
