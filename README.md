@@ -1,7 +1,7 @@
 # 🤖【NeurIPS 2025】SAMPO: Scale-wise Autoregression with Motion Prompt for Generative World Models
 [![project](https://img.shields.io/badge/Project%20Page-SAMPO-lightgreen)](https://sanmumumu.github.io/SAMPO/)&nbsp;
 [![arXiv](https://img.shields.io/badge/arXiv%20paper-2509.15536-b31b1b.svg)](https://arxiv.org/abs/2509.15536)&nbsp;
-[![huggingface](https://img.shields.io/badge/HuggingFace%20Model%20Hub-SAMPO-lightblue)](https://huggingface.co/collections/wsmumumu/sampo)&nbsp;
+[![huggingface](https://img.shields.io/badge/HuggingFace%20Model%20Hub-SAMPO-yellow)](https://huggingface.co/collections/wsmumumu/sampo)&nbsp;
 
 ![showcase](assets/architecture.png)
 
